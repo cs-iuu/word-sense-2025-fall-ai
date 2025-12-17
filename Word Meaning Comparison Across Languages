@@ -1,336 +1,132 @@
-{
- "cells": [
-  {
-   "cell_type": "code",
-   "execution_count": 10,
-   "id": "c520825c",
-   "metadata": {},
-   "outputs": [
-    {
-     "name": "stdout",
-     "output_type": "stream",
-     "text": [
-      "✅ Файл: Bible_NT.mn.txt амжилттай ачаалагдлаа.\n",
-      "✅ Файл: Bible_NT.en-kjv.txt амжилттай ачаалагдлаа.\n",
-      "\n",
-      "✅ XLM-R загвар амжилттай ачаалагдсан. (Төхөөрөмж: cpu)\n",
-      "\n",
-      "--- Эхлэл: Хэл Хоорондын Утгыг Уялдуулах ---\n"
-     ]
-    },
-    {
-     "name": "stderr",
-     "output_type": "stream",
-     "text": [
-      "Үгсийн хослолоор гүйцэтгэж байна: 100%|██████████| 5/5 [10:17<00:00, 123.57s/it]\n"
-     ]
-    }
-   ],
-   "source": [
-    "# ==============================================================================\n",
-    "# I. САНГУУДЫГ СУУЛГАХ БОЛОН ИМПОРТЛОХ\n",
-    "\n",
-    "import numpy as np\n",
-    "import random\n",
-    "import json\n",
-    "import re\n",
-    "import os\n",
-    "from transformers import AutoTokenizer, AutoModel\n",
-    "from sklearn.cluster import KMeans\n",
-    "from sklearn.metrics.pairwise import cosine_similarity\n",
-    "from tqdm import tqdm\n",
-    "import torch\n",
-    "\n",
-    "# ==============================================================================\n",
-    "# II. ТЕКСТ ФАЙЛУУДЫГ АЧААЛАХ (Таны оруулсан файлууд)\n",
-    "# ==============================================================================\n",
-    "\n",
-    "MN_FILES = ['Bible_NT.mn.txt']\n",
-    "EN_FILES = ['Bible_NT.en-kjv.txt']\n",
-    "\n",
-    "def load_corpus(file_list):\n",
-    "    \"\"\"Олон файлыг уншиж, нэг текст болгон нэгтгэнэ.\"\"\"\n",
-    "    full_text = \"\"\n",
-    "    for filename in file_list:\n",
-    "        try:\n",
-    "            with open(filename, 'r', encoding='utf-8') as f:\n",
-    "                full_text += f.read() + \" \"\n",
-    "            print(f\"✅ Файл: {filename} амжилттай ачаалагдлаа.\")\n",
-    "        except FileNotFoundError:\n",
-    "            print(f\"❌ АЛДАА: Файл: {filename} олдсонгүй. Файлын нэр эсвэл зам зөв эсэхийг шалгана уу.\")\n",
-    "            continue\n",
-    "   \n",
-    "    cleaned_text = re.sub(r'[\\r\\n]+', ' ', full_text).lower()\n",
-    "    return cleaned_text\n",
-    "\n",
-    "MN_BIBLE_TEXT = load_corpus(MN_FILES)\n",
-    "EN_BIBLE_TEXT = load_corpus(EN_FILES)\n",
-    "\n",
-    "# ==============================================================================\n",
-    "# III. SETTINGS & MODEL LOADING (XLM-RoBERTa)\n",
-    "# ==============================================================================\n",
-    "\n",
-    "EMBEDDING_MODEL_NAME = \"xlm-roberta-base\"\n",
-    "try:\n",
-    "    EMB_TOKENIZER = AutoTokenizer.from_pretrained(EMBEDDING_MODEL_NAME)\n",
-    "    EMB_MODEL = AutoModel.from_pretrained(EMBEDDING_MODEL_NAME)\n",
-    "    # GPU байгаа эсэхийг шалгана\n",
-    "    DEVICE = torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\n",
-    "    EMB_MODEL.to(DEVICE)\n",
-    "    print(f\"\\n✅ XLM-R загвар амжилттай ачаалагдсан. (Төхөөрөмж: {DEVICE})\")\n",
-    "except Exception as e:\n",
-    "    print(f\"\\n❌ АЛДАА: XLM-R загвар ачаалахад алдаа гарлаа: {e}\")\n",
-    "    raise\n",
-    "\n",
-    "# WSI хийх үгсийн хослол (Таны корпусын давтамж өндөр үгс)\n",
-    "TARGET_PAIRS = [\n",
-    "    (\"бурхан\", \"god\"),\n",
-    "    (\"гэрэл\", \"light\"),\n",
-    "    (\"ус\", \"water\"),\n",
-    "    (\"газар\", \"earth\"),\n",
-    "    (\"хүн\", \"man\")\n",
-    "]\n",
-    "\n",
-    "# ==============================================================================\n",
-    "# IV. UTILITY FUNCTIONS (Вектор үүсгэх, Багцлах)\n",
-    "# ==============================================================================\n",
-    "\n",
-    "def get_contextual_embedding(sentence, target_word):\n",
-    "    \"\"\"Тухайн өгүүлбэр дэх сонгосон үгний контекстуал векторуудын дунджийг буцаана.\"\"\"\n",
-    "    # Токенжуулалт\n",
-    "    inputs = EMB_TOKENIZER(sentence, return_tensors=\"pt\", truncation=True, max_length=128).to(DEVICE)\n",
-    "    with torch.no_grad():\n",
-    "        outputs = EMB_MODEL(**inputs)\n",
-    "        last_hidden = outputs.last_hidden_state.squeeze(0)\n",
-    "\n",
-    "    ids = inputs['input_ids'].squeeze(0).tolist()\n",
-    "    word_tokens = EMB_TOKENIZER.convert_ids_to_tokens(ids)\n",
-    "   \n",
-    "    target_start_index = -1\n",
-    "    target_end_index = -1\n",
-    "   \n",
-    "    current_word = \"\"\n",
-    "    for i, token in enumerate(word_tokens):\n",
-    "        if i == 0 or i == len(word_tokens) - 1: # [CLS] and [SEP]\n",
-    "            continue\n",
-    "       \n",
-    "        token_text = token[1:] if token.startswith(\" \") else token\n",
-    "       \n",
-    "        if token.startswith(\" \"):\n",
-    "            if current_word == target_word:\n",
-    "                target_end_index = i - 1\n",
-    "                break\n",
-    "            current_word = token_text\n",
-    "        else:\n",
-    "            current_word += token_text\n",
-    "       \n",
-    "        if current_word == target_word and target_start_index == -1:\n",
-    "             target_start_index = i\n",
-    "             target_end_index = i\n",
-    "\n",
-    "    if target_start_index != -1 and target_end_index == -1:\n",
-    "        target_end_index = target_start_index\n",
-    "\n",
-    "    if target_start_index != -1:\n",
-    "        target_embs = last_hidden[target_start_index:target_end_index+1, :]\n",
-    "        return target_embs.mean(dim=0).cpu().numpy()\n",
-    "       \n",
-    "    return None\n",
-    "\n",
-    "def collect_embeddings(corpus_text, target_word):\n",
-    "    \"\"\"Корпусаас өгүүлбэрүүдийг цуглуулж, контекстуал векторуудыг үүсгэнэ.\"\"\"\n",
-    "    sentences = [s.strip() for s in corpus_text.split('.') if s.strip()]\n",
-    "   \n",
-    "    contexts = []\n",
-    "    embeddings = []\n",
-    "    for sent in sentences:\n",
-    "        if target_word in sent.lower():\n",
-    "            emb = get_contextual_embedding(sent, target_word)\n",
-    "            if emb is not None:\n",
-    "                embeddings.append(emb)\n",
-    "                contexts.append(sent)\n",
-    "               \n",
-    "    return contexts, np.array(embeddings)\n",
-    "\n",
-    "def cluster_senses(embeddings, k=2):\n",
-    "    \"\"\"K-Means ашиглан утгын багцлалт хийж, төв цэгүүд болон шошгуудыг буцаана.\"\"\"\n",
-    "    if len(embeddings) < k:\n",
-    "        k = max(1, len(embeddings))\n",
-    "       \n",
-    "    if k == 0:\n",
-    "        return None, []\n",
-    "       \n",
-    "    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10).fit(embeddings)\n",
-    "    return kmeans, kmeans.labels_\n",
-    "\n",
-    "def compare_clusters(mo_centers, en_centers):\n",
-    "    \"\"\"Монгол ба Англи утгын төв цэгүүдийн хоорондын косинус төстэй байдлыг тооцоолно. \"\"\"\n",
-    "    sim = cosine_similarity(mo_centers, en_centers)\n",
-    "    return sim\n",
-    "\n",
-    "# ==============================================================================\n",
-    "# V. MAIN EXECUTION (Хэл Хоорондын Утгыг Уялдуулах)\n",
-    "# ==============================================================================\n",
-    "\n",
-    "if not MN_BIBLE_TEXT or not EN_BIBLE_TEXT:\n",
-    "    print(\"\\n❌ Гүйцэтгэл цуцлагдлаа. Корпус ачааллахад алдаа гарсан.\")\n",
-    "else:\n",
-    "    FINAL_RESULTS = {}\n",
-    "\n",
-    "    print(\"\\n--- Эхлэл: Хэл Хоорондын Утгыг Уялдуулах ---\")\n",
-    "\n",
-    "    for mo_word, en_word in tqdm(TARGET_PAIRS, desc=\"Үгсийн хослолоор гүйцэтгэж байна\"):\n",
-    "       \n",
-    "        # 1. Embeddings цуглуулах\n",
-    "        mo_sents, mo_embs = collect_embeddings(MN_BIBLE_TEXT, mo_word)\n",
-    "        en_sents, en_embs = collect_embeddings(EN_BIBLE_TEXT, en_word)"
-   ]
-  },
-  {
-   "cell_type": "code",
-   "execution_count": 7,
-   "id": "71580b03",
-   "metadata": {},
-   "outputs": [
-    {
-     "name": "stdout",
-     "output_type": "stream",
-     "text": [
-      "Requirement already satisfied: huggingface_hub[hf_xet] in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (0.36.0)\n",
-      "Requirement already satisfied: filelock in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from huggingface_hub[hf_xet]) (3.20.0)\n",
-      "Requirement already satisfied: fsspec>=2023.5.0 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from huggingface_hub[hf_xet]) (2025.12.0)\n",
-      "Requirement already satisfied: packaging>=20.9 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from huggingface_hub[hf_xet]) (25.0)\n",
-      "Requirement already satisfied: pyyaml>=5.1 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from huggingface_hub[hf_xet]) (6.0.3)\n",
-      "Requirement already satisfied: requests in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from huggingface_hub[hf_xet]) (2.32.5)\n",
-      "Requirement already satisfied: tqdm>=4.42.1 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from huggingface_hub[hf_xet]) (4.67.1)\n",
-      "Requirement already satisfied: typing-extensions>=3.7.4.3 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from huggingface_hub[hf_xet]) (4.15.0)\n",
-      "Requirement already satisfied: hf-xet<2.0.0,>=1.1.2 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from huggingface_hub[hf_xet]) (1.2.0)\n",
-      "Requirement already satisfied: colorama in c:\\users\\user\\appdata\\roaming\\python\\python312\\site-packages (from tqdm>=4.42.1->huggingface_hub[hf_xet]) (0.4.6)\n",
-      "Requirement already satisfied: charset_normalizer<4,>=2 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from requests->huggingface_hub[hf_xet]) (3.4.4)\n",
-      "Requirement already satisfied: idna<4,>=2.5 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from requests->huggingface_hub[hf_xet]) (3.11)\n",
-      "Requirement already satisfied: urllib3<3,>=1.21.1 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from requests->huggingface_hub[hf_xet]) (2.6.2)\n",
-      "Requirement already satisfied: certifi>=2017.4.17 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from requests->huggingface_hub[hf_xet]) (2025.11.12)\n",
-      "Note: you may need to restart the kernel to use updated packages.\n"
-     ]
-    },
-    {
-     "name": "stderr",
-     "output_type": "stream",
-     "text": [
-      "\n",
-      "[notice] A new release of pip is available: 25.0.1 -> 25.3\n",
-      "[notice] To update, run: python.exe -m pip install --upgrade pip\n"
-     ]
-    }
-   ],
-   "source": [
-    "pip install huggingface_hub[hf_xet]"
-   ]
-  },
-  {
-   "cell_type": "code",
-   "execution_count": 8,
-   "id": "85c26d94",
-   "metadata": {},
-   "outputs": [
-    {
-     "name": "stdout",
-     "output_type": "stream",
-     "text": [
-      "Requirement already satisfied: hf_xet in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (1.2.0)\n",
-      "Note: you may need to restart the kernel to use updated packages.\n"
-     ]
-    },
-    {
-     "name": "stderr",
-     "output_type": "stream",
-     "text": [
-      "\n",
-      "[notice] A new release of pip is available: 25.0.1 -> 25.3\n",
-      "[notice] To update, run: python.exe -m pip install --upgrade pip\n"
-     ]
-    }
-   ],
-   "source": [
-    "pip install hf_xet"
-   ]
-  },
-  {
-   "cell_type": "code",
-   "execution_count": 9,
-   "id": "9bfaf912",
-   "metadata": {},
-   "outputs": [
-    {
-     "name": "stdout",
-     "output_type": "stream",
-     "text": [
-      "Requirement already satisfied: transformers in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (4.57.3)\n",
-      "Requirement already satisfied: torch in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (2.9.1)\n",
-      "Requirement already satisfied: scikit-learn in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (1.8.0)\n",
-      "Requirement already satisfied: tqdm in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (4.67.1)\n",
-      "Requirement already satisfied: filelock in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from transformers) (3.20.0)\n",
-      "Requirement already satisfied: huggingface-hub<1.0,>=0.34.0 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from transformers) (0.36.0)\n",
-      "Requirement already satisfied: numpy>=1.17 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from transformers) (2.2.6)\n",
-      "Requirement already satisfied: packaging>=20.0 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from transformers) (25.0)\n",
-      "Requirement already satisfied: pyyaml>=5.1 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from transformers) (6.0.3)\n",
-      "Requirement already satisfied: regex!=2019.12.17 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from transformers) (2025.11.3)\n",
-      "Requirement already satisfied: requests in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from transformers) (2.32.5)\n",
-      "Requirement already satisfied: tokenizers<=0.23.0,>=0.22.0 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from transformers) (0.22.1)\n",
-      "Requirement already satisfied: safetensors>=0.4.3 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from transformers) (0.7.0)\n",
-      "Requirement already satisfied: typing-extensions>=4.10.0 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from torch) (4.15.0)\n",
-      "Requirement already satisfied: sympy>=1.13.3 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from torch) (1.14.0)\n",
-      "Requirement already satisfied: networkx>=2.5.1 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from torch) (3.6.1)\n",
-      "Requirement already satisfied: jinja2 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from torch) (3.1.6)\n",
-      "Requirement already satisfied: fsspec>=0.8.5 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from torch) (2025.12.0)\n",
-      "Requirement already satisfied: setuptools in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from torch) (80.9.0)\n",
-      "Requirement already satisfied: scipy>=1.10.0 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from scikit-learn) (1.16.3)\n",
-      "Requirement already satisfied: joblib>=1.3.0 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from scikit-learn) (1.5.3)\n",
-      "Requirement already satisfied: threadpoolctl>=3.2.0 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from scikit-learn) (3.6.0)\n",
-      "Requirement already satisfied: colorama in c:\\users\\user\\appdata\\roaming\\python\\python312\\site-packages (from tqdm) (0.4.6)\n",
-      "Requirement already satisfied: mpmath<1.4,>=1.1.0 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from sympy>=1.13.3->torch) (1.3.0)\n",
-      "Requirement already satisfied: MarkupSafe>=2.0 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from jinja2->torch) (3.0.3)\n",
-      "Requirement already satisfied: charset_normalizer<4,>=2 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from requests->transformers) (3.4.4)\n",
-      "Requirement already satisfied: idna<4,>=2.5 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from requests->transformers) (3.11)\n",
-      "Requirement already satisfied: urllib3<3,>=1.21.1 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from requests->transformers) (2.6.2)\n",
-      "Requirement already satisfied: certifi>=2017.4.17 in c:\\users\\user\\appdata\\local\\programs\\python\\python312\\lib\\site-packages (from requests->transformers) (2025.11.12)\n",
-      "Note: you may need to restart the kernel to use updated packages.\n"
-     ]
-    },
-    {
-     "name": "stderr",
-     "output_type": "stream",
-     "text": [
-      "\n",
-      "[notice] A new release of pip is available: 25.0.1 -> 25.3\n",
-      "[notice] To update, run: python.exe -m pip install --upgrade pip\n"
-     ]
-    }
-   ],
-   "source": [
-    "pip install transformers torch scikit-learn tqdm"
-   ]
-  }
- ],
- "metadata": {
-  "kernelspec": {
-   "display_name": "Python 3",
-   "language": "python",
-   "name": "python3"
-  },
-  "language_info": {
-   "codemirror_mode": {
-    "name": "ipython",
-    "version": 3
-   },
-   "file_extension": ".py",
-   "mimetype": "text/x-python",
-   "name": "python",
-   "nbconvert_exporter": "python",
-   "pygments_lexer": "ipython3",
-   "version": "3.12.10"
-  }
- },
- "nbformat": 4,
- "nbformat_minor": 5
-}
+import numpy as np
+import random
+import json
+import re
+import os
+from transformers import AutoTokenizer, AutoModel
+from sklearn.cluster import KMeans
+from sklearn.metrics.pairwise import cosine_similarity
+from tqdm import tqdm
+import torch
+MN_FILES = ['Bible_NT.mn.txt']
+EN_FILES = ['Bible_NT.en-kjv.txt']
+def load_corpus(file_list):
+    full_text = ""
+    for filename in file_list:
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                full_text += f.read() + " "
+            print(f" Файл: {filename} амжилттай ачаалагдлаа.")
+        except FileNotFoundError:
+            print(f" АЛДАА: Файл: {filename} олдсонгүй. Файлын нэр эсвэл зам зөв эсэхийг шалгана уу.")
+            continue
+   
+    cleaned_text = re.sub(r'[\r\n]+', ' ', full_text).lower()
+    return cleaned_text
+
+MN_BIBLE_TEXT = load_corpus(MN_FILES)
+EN_BIBLE_TEXT = load_corpus(EN_FILES)
+EMBEDDING_MODEL_NAME = "xlm-roberta-base"
+try:
+    EMB_TOKENIZER = AutoTokenizer.from_pretrained(EMBEDDING_MODEL_NAME)
+    EMB_MODEL = AutoModel.from_pretrained(EMBEDDING_MODEL_NAME)
+    # GPU байгаа эсэхийг шалгана
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    EMB_MODEL.to(DEVICE)
+    print(f"\n XLM-R загвар амжилттай ачаалагдсан. (Төхөөрөмж: {DEVICE})")
+except Exception as e:
+    print(f"\n АЛДАА: XLM-R загвар ачаалахад алдаа гарлаа: {e}")
+    raise
+
+# WSI хийх үгсийн хослол (Таны корпусын давтамж өндөр үгс)
+TARGET_PAIRS = [
+    ("бурхан", "god"),
+    ("гэрэл", "light"),
+    ("ус", "water"),
+    ("газар", "earth"),
+    ("хүн", "man")
+]
+def get_contextual_embedding(sentence, target_word):
+    """Тухайн өгүүлбэр дэх сонгосон үгний контекстуал векторуудын дунджийг буцаана."""
+    # Токенжуулалт
+    inputs = EMB_TOKENIZER(sentence, return_tensors="pt", truncation=True, max_length=128).to(DEVICE)
+    with torch.no_grad():
+        outputs = EMB_MODEL(**inputs)
+        last_hidden = outputs.last_hidden_state.squeeze(0)
+
+    ids = inputs['input_ids'].squeeze(0).tolist()
+    word_tokens = EMB_TOKENIZER.convert_ids_to_tokens(ids)
+   
+    target_start_index = -1
+    target_end_index = -1
+   
+    current_word = ""
+    for i, token in enumerate(word_tokens):
+        if i == 0 or i == len(word_tokens) - 1: # [CLS] and [SEP]
+            continue
+       
+        token_text = token[1:] if token.startswith(" ") else token
+       
+        if token.startswith(" "):
+            if current_word == target_word:
+                target_end_index = i - 1
+                break
+            current_word = token_text
+        else:
+            current_word += token_text
+       
+        if current_word == target_word and target_start_index == -1:
+             target_start_index = i
+             target_end_index = i
+
+    if target_start_index != -1 and target_end_index == -1:
+        target_end_index = target_start_index
+
+    if target_start_index != -1:
+        target_embs = last_hidden[target_start_index:target_end_index+1, :]
+        return target_embs.mean(dim=0).cpu().numpy()
+       
+    return None
+
+def collect_embeddings(corpus_text, target_word):
+    """Корпусаас өгүүлбэрүүдийг цуглуулж, контекстуал векторуудыг үүсгэнэ."""
+    sentences = [s.strip() for s in corpus_text.split('.') if s.strip()]
+   
+    contexts = []
+    embeddings = []
+    for sent in sentences:
+        if target_word in sent.lower():
+            emb = get_contextual_embedding(sent, target_word)
+            if emb is not None:
+                embeddings.append(emb)
+                contexts.append(sent)
+               
+    return contexts, np.array(embeddings)
+
+def cluster_senses(embeddings, k=2):
+    """K-Means ашиглан утгын багцлалт хийж, төв цэгүүд болон шошгуудыг буцаана."""
+    if len(embeddings) < k:
+        k = max(1, len(embeddings))
+       
+    if k == 0:
+        return None, []
+       
+    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10).fit(embeddings)
+    return kmeans, kmeans.labels_
+
+def compare_clusters(mo_centers, en_centers):
+    """Монгол ба Англи утгын төв цэгүүдийн хоорондын косинус төстэй байдлыг тооцоолно. """
+    sim = cosine_similarity(mo_centers, en_centers)
+    return sim
+if not MN_BIBLE_TEXT or not EN_BIBLE_TEXT:
+    print("\n Гүйцэтгэл цуцлагдлаа. Корпус ачааллахад алдаа гарсан.")
+else:
+    FINAL_RESULTS = {}
+
+    print("\n--- Эхлэл: Хэл Хоорондын Утгыг Уялдуулах ---")
+
+    for mo_word, en_word in tqdm(TARGET_PAIRS, desc="Үгсийн хослолоор гүйцэтгэж байна"):
+       
+        # 1. Embeddings цуглуулах
+        mo_sents, mo_embs = collect_embeddings(MN_BIBLE_TEXT, mo_word)
+        en_sents, en_embs = collect_embeddings(EN_BIBLE_TEXT, en_word)
